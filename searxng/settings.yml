@@ -1,0 +1,10 @@
+use_default_settings: true
+server:
+  secret_key: "odr"
+  limiter: false          # 开发环境可关闭
+search:
+  formats:
+    - html
+    - json                # 启用 JSON API
+valkey:
+  url: valkey://odr_redis:6379/0   # 指向 Redis 容器

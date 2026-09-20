@@ -1,0 +1,103 @@
+# Local development infrastructure: PostgreSQL only.
+# Usage: docker compose -f docker-compose.dev.yml up -d
+services:
+  postgres:
+    image: postgres:16
+    container_name: odr_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: nodr
+      POSTGRES_DB: nodr
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - odr_pgdata:/var/lib/postgresql/data
+    networks:
+      - odr_searxng
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nodr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  
+  redis:
+    container_name: odr_redis
+    image: docker.io/valkey/valkey:8-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      - odr_searxng
+    volumes:
+      - valkey-data2:/data
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+  searxng:
+    container_name: odr_searxng
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    networks:
+      - odr_searxng
+    # 默认映射到宿主机 8080 端口, 假如你想监听 8000 就改成 "127.0.0.1:8000:8080"
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://${SEARXNG_HOSTNAME:-localhost}/
+      - UWSGI_WORKERS=${SEARXNG_UWSGI_WORKERS:-4}
+      - UWSGI_THREADS=${SEARXNG_UWSGI_THREADS:-4}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/')\" || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+  nginx:
+    container_name: odr_nginx
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    networks:
+      - odr_searxng
+    ports:
+      - "80:80"      # HTTP
+      # - "443:443"    # HTTPS（需挂载证书）
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+     # - ./nginx/certs:/etc/nginx/certs:ro   # 可选：挂载 SSL 证书
+    depends_on:
+      searxng:
+        condition: service_healthy  #等待SearXNG监看检查通过，防止Nginx先于SearXNG启动，报错
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+networks:
+  odr_searxng:
+    driver: bridge
+
+volumes:
+  odr_pgdata:
+  valkey-data2:

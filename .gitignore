@@ -1,0 +1,91 @@
+
+*.egg-info
+*.pyc
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.env
+*.env
+
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Logs
+*.log
+logs/
+
+# Local development
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Dependencies
+node_modules/
+
+# LangGraph specific
+.langgraph/
+
+# Temporary files
+tmp/
+temp/
+
+.langgraph_api
+
+# Virtualenv (uv) — 82 files would otherwise be staged
+# Insert by documents and confuiguration files.
+.venv/
+.uv-cache/
+
+# Local runtime data: docstore index (user document text + embeddings),
+# generated charts and exports. Never commit (user data).
+data/
+
+# Build artifacts / local doc snapshots
+docs.zip
+build_pdf/*.pdf
+build_pdf/*.json
+
+# Agent scratch dirs
+.codebuddy/
+
+# pytest tmp dirs created when the system temp dir is unusable
+pytest-cache-files-*/
