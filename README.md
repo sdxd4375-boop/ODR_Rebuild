@@ -116,15 +116,39 @@ This creates `tests/expt_results/deep_research_bench_model-name.jsonl` with the 
 
 | 层级 | 命令 | 说明 |
 |------|------|------|
-| 单元测试（服务层 + 扩展模块） | `uv run pytest tests/server -q` | 33 个用例，无网络/无数据库依赖 |
-| 静态检查 | `uvx ruff check src/open_deep_research src/server tests/server migrations` | 新增/修改文件 0 违规 |
+| 单元测试（服务层 + 扩展模块） | `uv run pytest tests/server -q` | 全部离线用例（当前 42 个），无网络 / 无数据库 / 无 LLM |
+| 静态检查 | `uvx ruff check src/open_deep_research src/server tests/server scripts migrations` | 0 违规 |
+| 环境自检 | `uv run python scripts/env_check.py`（真实研究前加 `--strict`） | 脚本/依赖/DSN/前端产物逐项体检 |
+| 迁移冒烟 | `uv run alembic upgrade head && uv run alembic current` | 需要 PostgreSQL |
 | 评估（LLM-as-judge） | `python tests/run_evaluate.py` | 见下方 Evaluation，**产生真实费用** |
 
-- 测试执行报告归档：[`docs/testing/reports/`](docs/testing/reports/)（最新：[2026-09-06 扩展模块测试报告](docs/testing/reports/2026-09-06-extension-test-report.md)）
-- 架构视图（C4 模型，含变更标注）：[`docs/architecture/`](docs/architecture/)
-- 变更影响与回滚策略：[`docs/CHANGE_IMPACT.md`](docs/CHANGE_IMPACT.md)
+CI（`.github/workflows/ci.yml`）在每次 push / PR 上运行上述前两项，并用 Postgres 16 service 真跑一次 `alembic upgrade head` 与前端构建。
 
-> 端到端联调（真实研究 / 文档入库 / 出图 / 导出）需先启动 PostgreSQL 并配置 API 密钥，参见 `docs/FULLSTACK_EXTENSION_PLAN.md` §8.4。
+#### 自托管全栈（FastAPI + PostgreSQL + Vite）
+
+```bash
+docker compose -f docker-compose.dev.yml up -d postgres   # 只起数据库即可
+cp .env.example .env                                       # 填 TAVILY_API_KEY 等
+uv sync
+uv run alembic upgrade head                                # 业务表 + 用量表
+uv run python -m server                                    # http://127.0.0.1:8000/api/health
+cd web && npm ci && npm run build                          # 前端；FastAPI 会自动挂载 web/dist
+```
+
+两个 Windows 上的必读要点：
+
+- **用 `uv run python -m server` 启动**（或等价的 `scripts/dev_server.py`）。直接 `uvicorn server.app:app` 时 uvicorn 会先创建 ProactorEventLoop，psycopg 的异步模式会直接拒绝它，LangGraph checkpointer 永远起不来。
+- **DSN 用 `127.0.0.1`，不要写 `localhost`**。compose 只把 5433 发布在 IPv4 上；`localhost` 在 Windows 上可能先解析到 `::1`，psycopg 的异步连接会静默挂起（asyncpg 不受影响，所以业务表看起来是好的）。
+
+数据库或密钥缺失时服务不会崩：`/api/health` 返回 `503` 且 `status=degraded`，`db` / `graph` 字段指明是哪一项没起来。
+
+文档索引见 [`docs/README.md`](docs/README.md)。
+
+- 测试执行报告归档：[`docs/all_file/testing/reports/`](docs/all_file/testing/reports/)（最新：[2026-09-06 扩展模块测试报告](docs/all_file/testing/reports/2026-09-06-extension-test-report.md)）
+- 架构视图（C4 模型，含变更标注）：[`docs/all_file/architecture/`](docs/all_file/architecture/)
+- 变更影响与回滚策略：[`docs/all_file/CHANGE_IMPACT.md`](docs/all_file/CHANGE_IMPACT.md)
+
+> 端到端联调（真实研究 / 文档入库 / 出图 / 导出）需先启动 PostgreSQL 并配置 API 密钥，参见 `docs/all_file/FULLSTACK_EXTENSION_PLAN.md` §8.4。
 
 ### 🚀 Deployments and Usage
 
