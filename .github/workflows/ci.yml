@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: offline tests + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+      - run: uv python install 3.11
+      - run: uv sync --frozen
+      - name: Environment self-check
+        run: uv run python scripts/env_check.py
+      - name: Offline server tests (no network, no DB, no LLM)
+        run: uv run pytest tests/server -q
+      - name: Lint
+        run: uvx ruff check src/open_deep_research src/server tests/server scripts migrations
+
+  migrations:
+    name: alembic upgrade head
+    runs-on: ubuntu-latest
+    # Port 5432 here on purpose: this is a throwaway CI container, not the dev
+    # compose stack (docker-compose.dev.yml maps 5433 on the host).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: nodr
+          POSTGRES_DB: nodr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d nodr"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:nodr@localhost:5432/nodr
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+      - run: uv python install 3.11
+      - run: uv sync --frozen
+      # Proves migrations/env.py takes the DSN from DATABASE_URL (alembic.ini
+      # intentionally has a blank sqlalchemy.url) and that 0001 -> 0002 applies.
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+      - name: Assert head revision
+        run: uv run alembic current | grep -q 0002
+      - name: Assert idempotency
+        run: uv run alembic upgrade head
+
+  web:
+    name: frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build

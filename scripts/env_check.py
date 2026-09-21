@@ -104,9 +104,12 @@ else:
         warn("OPENAI_API_KEY looks empty/unset",
              "openai:* models read OPENAI_API_KEY — a custom base URL still needs it")
 
-# 6. frontend artifact
+# 6. frontend artifact (production only — the API works without it, see app.py)
 dist = ROOT / "web" / "dist" / "index.html"
-check("web/dist built", dist.exists(), "" if dist.exists() else "run: cd web && npm run build")
+if dist.exists():
+    check("web/dist built", True)
+else:
+    warn("web/dist not built", "production only: cd web && npm run build")
 
 print()
 if FAILURES:

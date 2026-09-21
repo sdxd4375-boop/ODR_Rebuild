@@ -104,5 +104,6 @@ convention = "google"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/server"]
-addopts = "-q"
+# No addopts here: the documented command is `pytest tests/server -q`, and a
+# second -q from addopts would swallow the "N passed" summary line.
 norecursedirs = ["src", ".venv", "web", "node_modules", ".git"]
