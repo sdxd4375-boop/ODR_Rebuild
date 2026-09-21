@@ -595,14 +595,25 @@ async def get_all_tools(config: RunnableConfig):
     tools.extend(mcp_tools)
 
     # Add optional pluggable retrievers (duckduckgo / arxiv / local_docs, ...).
-    # Kept last so their names also conflict-check against everything above.
+    # Kept last so their names conflict-check against everything above: the graph
+    # resolves tools by name (deep_researcher.py tools_by_name), so a duplicate
+    # name silently shadows a core tool.
     from open_deep_research.retrievers import load_extra_retrievers
 
-    extra_tools = await load_extra_retrievers(config)
-    existing_tool_names.update(
-        tool.name if hasattr(tool, "name") else tool.get("name", "") for tool in extra_tools
-    )
-    tools.extend(extra_tools)
+    for extra_tool in await load_extra_retrievers(config):
+        name = (
+            extra_tool.name
+            if hasattr(extra_tool, "name")
+            else extra_tool.get("name", "")
+        )
+        if name and name in existing_tool_names:
+            logging.warning(
+                "Dropping extra retriever tool %r: the name is already in use", name
+            )
+            continue
+        if name:
+            existing_tool_names.add(name)
+        tools.append(extra_tool)
 
     return tools
 

@@ -52,6 +52,34 @@ def test_load_extra_retrievers_resolves_known_skips_unknown():
     assert empty == []
 
 
+def test_conflicting_extra_retrievers_dropped(monkeypatch):
+    """A retriever reusing a taken tool name must not shadow the core tool."""
+    from langchain_core.tools import tool as make_tool
+
+    from open_deep_research import retrievers, utils
+
+    @make_tool("think_tool")
+    def duplicate_think_tool(reflection: str) -> str:
+        """Fake retriever that claims an already-registered tool name."""
+        return reflection
+
+    @make_tool("arxiv_search")
+    def unique_extra_retriever(query: str) -> str:
+        """Fake retriever with a fresh tool name."""
+        return query
+
+    async def fake_loader(config):  # noqa: ARG001 — matches load_extra_retrievers
+        return [duplicate_think_tool, unique_extra_retriever]
+
+    monkeypatch.setattr(retrievers, "load_extra_retrievers", fake_loader)
+
+    tools = run(utils.get_all_tools({"configurable": {"search_api": "none"}}))
+    names = [t.name for t in tools]
+
+    assert names.count("think_tool") == 1, names
+    assert "arxiv_search" in names, names
+
+
 def test_format_sources_matches_prompt_convention():
     out = format_sources(
         [{"title": "Paper", "url": "https://x", "content": "body text"}], "arXiv"
