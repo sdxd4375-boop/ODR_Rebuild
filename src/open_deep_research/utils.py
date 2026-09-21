@@ -4,8 +4,8 @@ import asyncio
 import logging
 import os
 import warnings
-from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any, Dict, List, Literal
 
 import aiohttp
 from langchain.chat_models import init_chat_model
@@ -203,7 +203,7 @@ async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
         
         return formatted_summary
         
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # Timeout during summarization - return original content
         logging.warning("Summarization timed out after 60 seconds, returning original content")
         return webpage_content
@@ -250,7 +250,7 @@ def think_tool(reflection: str) -> str:
 async def get_mcp_access_token(
     supabase_token: str,
     base_mcp_url: str,
-) -> Optional[Dict[str, Any]]:
+) -> Dict[str, Any] | None:
     """Exchange Supabase token for MCP access token using OAuth token exchange.
     
     Args:
@@ -318,7 +318,7 @@ async def get_tokens(config: RunnableConfig):
     # Check token expiration
     expires_in = tokens.value.get("expires_in")  # seconds until expiration
     created_at = tokens.created_at  # datetime of token creation
-    current_time = datetime.now(timezone.utc)
+    current_time = datetime.now(UTC)
     expiration_time = created_at + timedelta(seconds=expires_in)
     
     if current_time > expiration_time:

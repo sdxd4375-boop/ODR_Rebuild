@@ -8,7 +8,7 @@ can list history without reading checkpoint internals.
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -162,7 +162,7 @@ async def _archive(
         if error_message is not None:
             row.error_message = error_message
         if status in ("awaiting_input", "completed", "failed"):
-            row.finished_at = datetime.now(timezone.utc)
+            row.finished_at = datetime.now(UTC)
         await db.commit()
 
 

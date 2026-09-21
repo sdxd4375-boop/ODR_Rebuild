@@ -1,4 +1,4 @@
-# Local development infrastructure: PostgreSQL only.
+# Local development infrastructure: PostgreSQL, Redis (valkey), SearXNG and nginx.
 # Usage: docker compose -f docker-compose.dev.yml up -d
 services:
   postgres:
