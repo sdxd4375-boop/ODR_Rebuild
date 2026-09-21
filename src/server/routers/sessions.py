@@ -31,6 +31,16 @@ router = APIRouter(tags=["sessions"])
 # `finished_at` is stamped for every terminal status.
 TERMINAL_STATUSES = frozenset({"awaiting_input", "completed", "failed", "cancelled"})
 
+# One in-flight run per session. NOTE: process-local — it only holds for a single
+# worker. Running multiple workers (`uvicorn --workers N`) would need a Postgres
+# advisory lock (`pg_try_advisory_lock(hashtext(thread_id))`) instead.
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(thread_id: str) -> asyncio.Lock:
+    """Per-thread mutex: at most one in-flight run per session."""
+    return _locks.setdefault(thread_id, asyncio.Lock())
+
 
 class CreateSessionRequest(BaseModel):
     """Body of POST /api/sessions."""
@@ -499,7 +509,20 @@ async def stream_run(
     config = {"configurable": {**configurable, "thread_id": session_id}}
     inputs = {"messages": [{"role": "user", "content": message}]}
 
-    await _archive(session_id, status="running")
+    # Reject a second concurrent run on the same thread: two overlapping
+    # `astream` calls would race on the same checkpointer state. The
+    # locked()/acquire() pair is atomic here because nothing awaits between them.
+    lock = _lock_for(session_id)
+    if lock.locked():
+        raise HTTPException(
+            status_code=409, detail="This session already has a run in progress"
+        )
+    await lock.acquire()
+    try:
+        await _archive(session_id, status="running")
+    except BaseException:
+        lock.release()
+        raise
 
     return StreamingResponse(
         _stream_frames(
@@ -508,6 +531,7 @@ async def stream_run(
             config=config,
             session_id=session_id,
             user_id=user_id,
+            lock=lock,
         ),
         media_type="text/event-stream",
         headers={

@@ -506,3 +506,98 @@ def test_stream_frames_releases_the_lock(monkeypatch):
     asyncio.run(drive())
 
     assert lock.locked() is False
+
+
+# ------------------------------------------------------------- same-session mutex
+class _HeldLock:
+    """Stand-in for a lock that another in-flight run already holds."""
+
+    def locked(self) -> bool:
+        return True
+
+    async def acquire(self) -> bool:  # pragma: no cover — never reached
+        raise AssertionError("must not acquire an already-held lock")
+
+    def release(self) -> None:  # pragma: no cover — never reached
+        raise AssertionError("must not release a lock this request never took")
+
+
+def _sessions_app(monkeypatch, graph=None) -> tuple:
+    """Minimal app with only the sessions router: no lifespan, no DB, no LLM."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from server import graphs
+    from server.routers import sessions as S
+
+    monkeypatch.setenv("AUTH_MODE", "local")
+    calls: list[dict] = []
+
+    async def fake_get_session(user_id, session_id):
+        return SimpleNamespace(
+            id=session_id, user_id=user_id, question="q", status="created",
+            research_brief=None, final_report=None,
+        )
+
+    async def fake_archive(session_id, *, status, **kwargs):
+        calls.append({"session_id": session_id, "status": status, **kwargs})
+
+    async def fake_record_usage(user_id, thread_id, aggregated):
+        return None
+
+    monkeypatch.setattr(S, "_get_session", fake_get_session)
+    monkeypatch.setattr(S, "_archive", fake_archive)
+    monkeypatch.setattr(S, "_record_usage", fake_record_usage)
+    monkeypatch.setattr(graphs.manager, "graph", graph or _FakeGraph(), raising=False)
+
+    app = FastAPI()
+    app.include_router(S.router, prefix="/api/sessions")
+    return app, calls
+
+
+def test_session_lock_registry_is_per_thread():
+    from server.routers.sessions import _lock_for
+
+    assert _lock_for("a") is _lock_for("a")
+    assert _lock_for("a") is not _lock_for("b")
+
+
+def test_concurrent_run_on_same_session_is_rejected(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from server.routers import sessions as S
+
+    app, calls = _sessions_app(monkeypatch)
+    monkeypatch.setattr(S, "_lock_for", lambda thread_id: _HeldLock())
+
+    with TestClient(app) as client:
+        res = client.post("/api/sessions/s1/runs/stream", json={})
+
+    assert res.status_code == 409
+    assert "in progress" in res.json()["detail"]
+    # A rejected request must not touch the session state.
+    assert calls == []
+
+
+def test_run_stream_returns_sse_and_releases_the_lock(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from server.routers import sessions as S
+
+    app, calls = _sessions_app(
+        monkeypatch,
+        graph=_FakeGraph(
+            items=[((), "updates", {"final_report_generation": {"final_report": "R"}})]
+        ),
+    )
+
+    with TestClient(app) as client:
+        res = client.post("/api/sessions/free-session/runs/stream", json={})
+
+    assert res.status_code == 200
+    assert res.headers["content-type"].startswith("text/event-stream")
+    assert "event: done" in res.text
+    assert [c["status"] for c in calls] == ["running", "completed"]
+    # Released once the stream finished, so the session can be run again.
+    assert S._lock_for("free-session").locked() is False
