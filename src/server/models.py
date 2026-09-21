@@ -28,7 +28,7 @@ class ResearchReport(Base):
     question: Mapped[str] = mapped_column(Text)
     research_brief: Mapped[str | None] = mapped_column(Text, nullable=True)
     final_report: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # created -> running -> awaiting_input | completed | failed
+    # created -> running -> awaiting_input | completed | failed | cancelled
     status: Mapped[str] = mapped_column(String(32), default="created")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

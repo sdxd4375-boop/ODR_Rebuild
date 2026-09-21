@@ -329,3 +329,180 @@ def test_map_messages_in_subgraph_is_tagged():
             },
         )
     ]
+
+
+# ---------------------------------------------------------------- run settlement
+class _FakeGraph:
+    """Minimal stand-in for the compiled graph: no DB, no LLM, no network."""
+
+    def __init__(self, items=(), state=None):
+        self._items = list(items)
+        self._state = (
+            state if state is not None else {"messages": [], "research_brief": None}
+        )
+
+    async def astream(self, inputs, config, **kwargs):
+        for item in self._items:
+            yield item
+
+    async def aget_state(self, config):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(values=self._state)
+
+
+class _BoomGraph(_FakeGraph):
+    """Graph whose stream fails immediately."""
+
+    async def astream(self, inputs, config, **kwargs):
+        raise ValueError("boom")
+        yield  # pragma: no cover — makes this an async generator
+
+
+def _parse_frame(raw: str) -> tuple[str, dict]:
+    """Parse one SSE frame produced by ``_sse`` back into (event, data)."""
+    import json
+
+    lines = raw.strip().split("\n")
+    return lines[0].removeprefix("event: "), json.loads(lines[1].removeprefix("data: "))
+
+
+def _patch_settlement(monkeypatch) -> list[dict]:
+    """Capture settlements instead of touching the database."""
+    from server.routers import sessions as S
+
+    calls: list[dict] = []
+
+    async def fake_archive(session_id, *, status, **kwargs):
+        calls.append({"session_id": session_id, "status": status, **kwargs})
+
+    async def fake_record_usage(user_id, thread_id, aggregated):
+        return None
+
+    monkeypatch.setattr(S, "_archive", fake_archive)
+    monkeypatch.setattr(S, "_record_usage", fake_record_usage)
+    return calls
+
+
+async def _collect(agen) -> list[str]:
+    return [frame async for frame in agen]
+
+
+def test_terminal_status_set_includes_cancelled():
+    from server.routers.sessions import TERMINAL_STATUSES
+
+    assert {"awaiting_input", "completed", "failed", "cancelled"} <= set(
+        TERMINAL_STATUSES
+    )
+
+
+def test_stream_frames_archives_completed_and_emits_done(monkeypatch):
+    from server.routers import sessions as S
+
+    calls = _patch_settlement(monkeypatch)
+    graph = _FakeGraph(
+        items=[((), "updates", {"final_report_generation": {"final_report": "R"}})]
+    )
+
+    frames = asyncio.run(
+        _collect(
+            S._stream_frames(
+                graph=graph,
+                inputs={},
+                config={},
+                session_id="s1",
+                user_id="u1",
+                run_timeout=0,
+                lock=None,
+            )
+        )
+    )
+
+    assert [_parse_frame(f)[0] for f in frames] == ["node", "done"]
+    done = _parse_frame(frames[-1])[1]
+    assert done["status"] == "completed"
+    assert done["final_report"] == "R"
+    assert [c["status"] for c in calls] == ["completed"]
+
+
+def test_stream_frames_archives_failed_on_exception(monkeypatch):
+    from server.routers import sessions as S
+
+    calls = _patch_settlement(monkeypatch)
+
+    frames = asyncio.run(
+        _collect(
+            S._stream_frames(
+                graph=_BoomGraph(),
+                inputs={},
+                config={},
+                session_id="s1",
+                user_id="u1",
+                run_timeout=0,
+                lock=None,
+            )
+        )
+    )
+
+    assert [_parse_frame(f)[0] for f in frames] == ["error"]
+    assert [c["status"] for c in calls] == ["failed"]
+    assert calls[0]["error_message"] == "boom"
+
+
+def test_stream_frames_archives_cancelled_on_client_disconnect(monkeypatch):
+    """A closed stream must not leave the session stuck in "running"."""
+    import contextlib
+
+    from server.routers import sessions as S
+
+    calls = _patch_settlement(monkeypatch)
+    graph = _FakeGraph(items=[((), "updates", {"supervisor": {}})])
+
+    async def drive():
+        gen = S._stream_frames(
+            graph=graph,
+            inputs={},
+            config={},
+            session_id="s1",
+            user_id="u1",
+            run_timeout=0,
+            lock=None,
+        )
+        first = await gen.__anext__()
+        # Starlette closes the body generator this way when the client is gone.
+        with contextlib.suppress(StopAsyncIteration, GeneratorExit):
+            await gen.athrow(GeneratorExit)
+        return first
+
+    first = asyncio.run(drive())
+
+    assert first.startswith("event: node\n")
+    assert [c["status"] for c in calls] == ["cancelled"]
+
+
+def test_stream_frames_releases_the_lock(monkeypatch):
+    from server.routers import sessions as S
+
+    _patch_settlement(monkeypatch)
+    lock = asyncio.Lock()
+
+    async def drive():
+        await lock.acquire()
+        frames = await _collect(
+            S._stream_frames(
+                graph=_FakeGraph(
+                    items=[((), "updates", {"final_report_generation": {"final_report": "R"}})]
+                ),
+                inputs={},
+                config={},
+                session_id="s1",
+                user_id="u1",
+                run_timeout=0,
+                lock=lock,
+            )
+        )
+        return frames
+
+    asyncio.run(drive())
+
+    assert lock.locked() is False

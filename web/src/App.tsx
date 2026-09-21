@@ -16,6 +16,7 @@ export default function App() {
   const [report, setReport] = useState<string | null>(null)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [abort, setAbort] = useState<AbortController | null>(null)
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -49,11 +50,13 @@ export default function App() {
   }
 
   async function runStream(sessionId: string, message?: string) {
+    const controller = new AbortController()
+    setAbort(controller)
     setBusy(true)
     setError(null)
     setSteps([])
     try {
-      for await (const ev of streamRun(sessionId, message)) {
+      for await (const ev of streamRun(sessionId, message, controller.signal)) {
         if (ev.event === 'node') {
           setSteps((s) => [...s, ev.node])
         } else if (ev.event === 'message') {
@@ -80,18 +83,23 @@ export default function App() {
         } else if (ev.event === 'done') {
           setStatus(ev.status)
           if (ev.final_report) setReport(ev.final_report)
-          setBusy(false)
           refreshSessions()
         } else if (ev.event === 'error') {
           setError(ev.message)
-          setBusy(false)
           refreshSessions()
         }
       }
     } catch (e) {
-      setError(`流式连接中断：${String(e)}`)
-      setBusy(false)
+      // A user-initiated stop is not an error: the server archives `cancelled`.
+      if ((e as Error)?.name === 'AbortError') {
+        setStatus('cancelled')
+      } else {
+        setError(`流式连接中断：${String(e)}`)
+      }
       refreshSessions()
+    } finally {
+      setAbort(null)
+      setBusy(false)
     }
   }
 
@@ -133,7 +141,13 @@ export default function App() {
           </span>
         </header>
         {error && <p className="error">{error}</p>}
-        <ChatPanel messages={messages} steps={steps} busy={busy} onSend={onSend} />
+        <ChatPanel
+          messages={messages}
+          steps={steps}
+          busy={busy}
+          onSend={onSend}
+          onStop={() => abort?.abort()}
+        />
         {report && (
           <section className="report-pane">
             <h2>最终报告</h2>

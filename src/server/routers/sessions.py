@@ -6,6 +6,7 @@ the final report into the `research_reports` business table so the frontend
 can list history without reading checkpoint internals.
 """
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -26,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["sessions"])
 
-# Status transitions: created -> running -> awaiting_input | completed | failed
+# Status transitions: created -> running -> awaiting_input | completed | failed | cancelled
+# `finished_at` is stamped for every terminal status.
+TERMINAL_STATUSES = frozenset({"awaiting_input", "completed", "failed", "cancelled"})
 
 
 class CreateSessionRequest(BaseModel):
@@ -225,9 +228,157 @@ async def _archive(
             row.final_report = final_report
         if error_message is not None:
             row.error_message = error_message
-        if status in ("awaiting_input", "completed", "failed"):
+        if status in TERMINAL_STATUSES:
             row.finished_at = datetime.now(UTC)
         await db.commit()
+
+
+async def _settle_run(
+    session_id: str,
+    user_id: str,
+    *,
+    usage_acc: dict[tuple[str, str], dict[str, Any]],
+    status: str,
+    final_report: str | None = None,
+    research_brief: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Persist usage plus the terminal status, surviving task cancellation.
+
+    A client disconnect reaches the streaming generator as ``GeneratorExit``
+    (or ``CancelledError`` when the surrounding task is cancelled). Awaiting the
+    write directly can be re-cancelled by the outer cancel scope, which left
+    sessions stuck in "running" forever; the write therefore runs in its own
+    task and we only wait on a shield.
+    """
+
+    async def _write() -> None:
+        await _record_usage(user_id, session_id, aggregate_usage(usage_acc))
+        await _archive(
+            session_id,
+            status=status,
+            research_brief=research_brief,
+            final_report=final_report,
+            error_message=error_message,
+        )
+
+    task = asyncio.create_task(_write())
+    try:
+        await asyncio.shield(task)
+    except BaseException:  # noqa: BLE001 — cancellation must not lose the archive
+        logger.info(
+            "Settlement for session %s continues in the background (status=%s)",
+            session_id,
+            status,
+        )
+
+
+async def _stream_frames(
+    *,
+    graph: Any,
+    inputs: dict[str, Any],
+    config: dict[str, Any],
+    session_id: str,
+    user_id: str,
+    run_timeout: int = 0,
+    lock: asyncio.Lock | None = None,
+):
+    """Yield the SSE frames of one run, always leaving a terminal status behind.
+
+    Extracted from the endpoint so the settlement contract (completed / failed /
+    cancelled) can be driven directly in offline tests.
+    """
+    final_report: str | None = None
+    usage_acc: dict[tuple[str, str], dict[str, Any]] = {}
+    settled = False
+    try:
+        try:
+            async with asyncio.timeout(run_timeout or None):
+                async for ns, mode, payload in graph.astream(
+                    inputs,
+                    config,
+                    stream_mode=["updates", "messages"],
+                    subgraphs=True,
+                ):
+                    frames, report = _map_stream_item(ns, mode, payload, usage_acc)
+                    if report:
+                        final_report = report
+                    for event, data in frames:
+                        yield _sse(event, data)
+        except TimeoutError:
+            message = f"run timed out after {run_timeout}s"
+            logger.warning("Run timed out for session %s (%s)", session_id, message)
+            await _settle_run(
+                session_id,
+                user_id,
+                usage_acc=usage_acc,
+                status="failed",
+                final_report=final_report,
+                error_message=message,
+            )
+            settled = True
+            yield _sse("error", {"message": message})
+            return
+
+        # Classify the outcome from the persisted thread state.
+        brief: str | None = None
+        status = "completed"
+        if not final_report:
+            snapshot = await graph.aget_state(config)
+            values = snapshot.values or {}
+            brief = values.get("research_brief")
+            last = (values.get("messages") or [None])[-1]
+            if isinstance(last, AIMessage):
+                # clarify_with_user ended the run without a report
+                status = "awaiting_input"
+            else:
+                status = "failed"
+                final_report = None
+
+        await _settle_run(
+            session_id,
+            user_id,
+            usage_acc=usage_acc,
+            status=status,
+            research_brief=brief,
+            final_report=final_report,
+        )
+        settled = True
+        yield _sse(
+            "done",
+            {
+                "status": status,
+                "final_report": final_report,
+                "usage": aggregate_usage(usage_acc),
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced to the client
+        logger.exception("Run failed for session %s", session_id)
+        await _settle_run(
+            session_id,
+            user_id,
+            usage_acc=usage_acc,
+            status="failed",
+            final_report=final_report,
+            error_message=str(exc),
+        )
+        settled = True
+        yield _sse("error", {"message": str(exc)})
+    except BaseException:
+        # Client disconnected or the task was cancelled: no frame can be
+        # delivered any more, but the session must not stay "running".
+        logger.info("Run cancelled for session %s", session_id)
+        if not settled:
+            await _settle_run(
+                session_id,
+                user_id,
+                usage_acc=usage_acc,
+                status="cancelled",
+                final_report=final_report,
+            )
+    finally:
+        if lock is not None and lock.locked():
+            lock.release()
 
 
 @router.post("", response_model=SessionOut)
@@ -350,57 +501,14 @@ async def stream_run(
 
     await _archive(session_id, status="running")
 
-    async def event_stream():
-        final_report: str | None = None
-        usage_acc: dict[tuple[str, str], dict[str, Any]] = {}
-        try:
-            async for ns, mode, payload in graph.astream(
-                inputs,
-                config,
-                stream_mode=["updates", "messages"],
-                subgraphs=True,
-            ):
-                frames, report = _map_stream_item(ns, mode, payload, usage_acc)
-                if report:
-                    final_report = report
-                for event, data in frames:
-                    yield _sse(event, data)
-
-            # Classify the outcome from the persisted thread state.
-            brief: str | None = None
-            status = "completed"
-            if not final_report:
-                snapshot = await graph.aget_state(config)
-                values = snapshot.values or {}
-                brief = values.get("research_brief")
-                last = (values.get("messages") or [None])[-1]
-                if isinstance(last, AIMessage):
-                    # clarify_with_user ended the run without a report
-                    status = "awaiting_input"
-                else:
-                    status = "failed"
-                    final_report = None
-
-            usage = aggregate_usage(usage_acc)
-            await _record_usage(user_id, session_id, usage)
-            await _archive(
-                session_id,
-                status=status,
-                research_brief=brief,
-                final_report=final_report,
-            )
-            yield _sse(
-                "done",
-                {"status": status, "final_report": final_report, "usage": usage},
-            )
-        except Exception as exc:  # noqa: BLE001 — surfaced to the client
-            logger.exception("Run failed for session %s", session_id)
-            await _record_usage(user_id, session_id, aggregate_usage(usage_acc))
-            await _archive(session_id, status="failed", error_message=str(exc))
-            yield _sse("error", {"message": str(exc)})
-
     return StreamingResponse(
-        event_stream(),
+        _stream_frames(
+            graph=graph,
+            inputs=inputs,
+            config=config,
+            session_id=session_id,
+            user_id=user_id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -16,11 +16,13 @@ export default function ChatPanel({
   steps,
   busy,
   onSend,
+  onStop,
 }: {
   messages: ChatMessage[]
   steps: string[]
   busy: boolean
   onSend: (text: string) => void
+  onStop?: () => void
 }) {
   const [input, setInput] = useState('')
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -58,7 +60,14 @@ export default function ChatPanel({
                 {s}
               </div>
             ))}
-            <div className="step active">研究中…</div>
+            <div className="step active">
+              <span>研究中…</span>
+              {onStop && (
+                <button className="stop" type="button" onClick={onStop}>
+                  停止
+                </button>
+              )}
+            </div>
           </div>
         )}
         <div ref={bottomRef} />
