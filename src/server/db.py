@@ -32,9 +32,21 @@ def database_url() -> str | None:
 
 
 def checkpointer_dsn() -> str | None:
-    """DSN for AsyncPostgresSaver, which speaks plain postgres:// (psycopg)."""
+    """DSN for AsyncPostgresSaver, which speaks plain postgresql:// (psycopg).
+
+    A connect_timeout is appended so an unreachable host fails in seconds rather
+    than hanging forever: on Windows `localhost` may resolve to ::1 while Docker
+    publishes 127.0.0.1 only, and psycopg's async connect then stalls silently
+    (asyncpg, used for the business tables, does not).
+    """
     url = database_url()
-    return url.replace("+asyncpg", "") if url else None
+    if not url:
+        return None
+    dsn = url.replace("+asyncpg", "")
+    if "connect_timeout=" in dsn:
+        return dsn
+    separator = "&" if "?" in dsn else "?"
+    return f"{dsn}{separator}connect_timeout=10"
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
