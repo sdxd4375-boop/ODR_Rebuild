@@ -160,6 +160,13 @@ body {
   margin: 0 0 12px;
 }
 
+.usage {
+  color: var(--muted);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
 /* ---------- Chat ---------- */
 .chat {
   flex: 1;

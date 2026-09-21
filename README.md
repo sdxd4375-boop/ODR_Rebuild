@@ -142,6 +142,14 @@ cd web && npm ci && npm run build                          # 前端；FastAPI �
 
 数据库或密钥缺失时服务不会崩：`/api/health` 返回 `503` 且 `status=degraded`，`db` / `graph` 字段指明是哪一项没起来。
 
+运行时的三个可选开关：
+
+- **同一会话串行**：已有运行时再次 `POST /api/sessions/{id}/runs/stream` 返回 `409`。该互斥锁是**进程内**的，所以当前部署必须**单 worker**；多 worker 需改用 Postgres advisory lock（`pg_try_advisory_lock(hashtext(thread_id))`）。
+- `RUN_TIMEOUT_SECONDS`（默认 `0` = 不限）：单次运行的墙钟上限；超时归档为 `failed`，并通过 SSE `error` 说明原因。
+- `MAX_TOKENS_PER_USER_PER_DAY`（默认 `0` = 不限）：按 UTC 自然日统计 `usage_events.total_tokens`，超限时新运行返回 `429`。
+
+客户端断开（前端「停止」或直接关页）会把该会话归档为 `cancelled`，不会一直停在 `running`。
+
 文档索引见 [`docs/README.md`](docs/README.md)。
 
 - 测试执行报告归档：[`docs/all_file/testing/reports/`](docs/all_file/testing/reports/)（最新：[2026-09-06 扩展模块测试报告](docs/all_file/testing/reports/2026-09-06-extension-test-report.md)）

@@ -3,7 +3,7 @@ import ChatPanel, { type ChatMessage } from './components/ChatPanel'
 import ReportView from './components/ReportView'
 import SessionList from './components/SessionList'
 import { createSession, getSession, listSessions, streamRun } from './lib/api'
-import type { Session } from './types'
+import type { RunUsage, Session } from './types'
 
 export default function App() {
   const [sessions, setSessions] = useState<Session[]>([])
@@ -17,6 +17,7 @@ export default function App() {
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [abort, setAbort] = useState<AbortController | null>(null)
+  const [usage, setUsage] = useState<RunUsage | null>(null)
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -55,6 +56,7 @@ export default function App() {
     setBusy(true)
     setError(null)
     setSteps([])
+    setUsage(null)
     try {
       for await (const ev of streamRun(sessionId, message, controller.signal)) {
         if (ev.event === 'node') {
@@ -83,6 +85,7 @@ export default function App() {
         } else if (ev.event === 'done') {
           setStatus(ev.status)
           if (ev.final_report) setReport(ev.final_report)
+          if (ev.usage) setUsage(ev.usage)
           refreshSessions()
         } else if (ev.event === 'error') {
           setError(ev.message)
@@ -141,6 +144,9 @@ export default function App() {
           </span>
         </header>
         {error && <p className="error">{error}</p>}
+        {usage && Object.keys(usage).length > 0 && (
+          <p className="usage">本次 token 合计：{Object.values(usage).reduce((sum, u) => sum + u.total, 0)}</p>
+        )}
         <ChatPanel
           messages={messages}
           steps={steps}

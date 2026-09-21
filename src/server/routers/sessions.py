@@ -9,6 +9,7 @@ can list history without reading checkpoint internals.
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,7 +21,12 @@ from sqlalchemy import desc, func, select
 
 from server import graphs
 from server.db import get_session_factory
-from server.deps import apply_cost_caps, auth_mode, get_current_user_id
+from server.deps import (
+    apply_cost_caps,
+    auth_mode,
+    enforce_token_quota,
+    get_current_user_id,
+)
 from server.models import ResearchReport, UsageEvent
 
 logger = logging.getLogger(__name__)
@@ -40,6 +46,19 @@ _locks: dict[str, asyncio.Lock] = {}
 def _lock_for(thread_id: str) -> asyncio.Lock:
     """Per-thread mutex: at most one in-flight run per session."""
     return _locks.setdefault(thread_id, asyncio.Lock())
+
+
+def _run_timeout_seconds() -> int:
+    """Wall-clock cap for one run, in seconds (``RUN_TIMEOUT_SECONDS``).
+
+    0 — the default — means unlimited, so behaviour is unchanged until an
+    operator opts in.
+    """
+    raw = os.environ.get("RUN_TIMEOUT_SECONDS", "") or 0
+    try:
+        return max(int(float(raw)), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class CreateSessionRequest(BaseModel):
@@ -496,6 +515,7 @@ async def stream_run(
     completion the outcome is archived into the research_reports table.
     """
     row = await _get_session(user_id, session_id)
+    await enforce_token_quota(user_id)
     graph = graphs.manager.get_graph()
 
     message = body.message or row.question
@@ -531,6 +551,7 @@ async def stream_run(
             config=config,
             session_id=session_id,
             user_id=user_id,
+            run_timeout=_run_timeout_seconds(),
             lock=lock,
         ),
         media_type="text/event-stream",

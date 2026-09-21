@@ -23,9 +23,20 @@ export interface SessionDetail extends Session {
   messages: { role: 'user' | 'assistant'; content: string }[]
 }
 
+/** Token usage per graph node, as aggregated by the server on completion. */
+export interface NodeUsage {
+  input: number
+  output: number
+  total: number
+  calls: number
+  model?: string | null
+}
+
+export type RunUsage = Record<string, NodeUsage>
+
 // SSE events emitted by POST /api/sessions/{id}/runs/stream
 export type StreamEvent =
-  | { event: 'node'; node: string }
-  | { event: 'message'; node: string; content: string }
-  | { event: 'done'; status: SessionStatus; final_report: string | null }
+  | { event: 'node'; node: string; subgraph?: boolean; namespace?: string }
+  | { event: 'message'; node: string; content: string; subgraph?: boolean; namespace?: string }
+  | { event: 'done'; status: SessionStatus; final_report: string | null; usage?: RunUsage }
   | { event: 'error'; message: string }

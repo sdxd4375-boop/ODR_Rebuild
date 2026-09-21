@@ -96,6 +96,68 @@ async def get_current_user_id(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
 
+
+def _int_env(name: str, default: int = 0) -> int:
+    """Read a non-negative integer env var, tolerating floats and junk."""
+    raw = os.environ.get(name, "") or default
+    try:
+        return max(int(float(raw)), 0)
+    except (TypeError, ValueError):
+        return default
+
+
+async def _tokens_used_today(user_id: str) -> int:
+    """Sum of ``usage_events.total_tokens`` for this user since UTC midnight.
+
+    Returns 0 when the database is unavailable (engine never started, or the
+    query fails). A missing DB must neither 500 the run endpoint nor block a
+    run that is otherwise fine.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy import func, select
+
+    from server.db import get_session_factory
+    from server.models import UsageEvent
+
+    try:
+        factory = get_session_factory()
+        midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        async with factory() as db:
+            total = await db.scalar(
+                select(func.coalesce(func.sum(UsageEvent.total_tokens), 0)).where(
+                    UsageEvent.user_id == user_id,
+                    UsageEvent.created_at >= midnight,
+                )
+            )
+    except RuntimeError:
+        return 0
+    except Exception:  # noqa: BLE001 — quota must degrade, not crash the request
+        logger.warning("Could not read token usage for %s; skipping quota", user_id)
+        return 0
+    return int(total or 0)
+
+
+async def enforce_token_quota(user_id: str) -> None:
+    """Raise 429 when the user's daily token budget is exhausted.
+
+    ``MAX_TOKENS_PER_USER_PER_DAY`` <= 0 (the default) disables the check, so a
+    fresh clone keeps working without configuration. `idx_usage_user_created`
+    already covers the lookup, so no migration is needed.
+    """
+    limit = _int_env("MAX_TOKENS_PER_USER_PER_DAY")
+    if limit <= 0:
+        return
+    used = await _tokens_used_today(user_id)
+    if used >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Daily token budget exhausted ({used}/{limit} tokens). "
+                "Raise MAX_TOKENS_PER_USER_PER_DAY or try again tomorrow."
+            ),
+        )
+
 _env_loaded = False
 
 

@@ -601,3 +601,142 @@ def test_run_stream_returns_sse_and_releases_the_lock(monkeypatch):
     assert [c["status"] for c in calls] == ["running", "completed"]
     # Released once the stream finished, so the session can be run again.
     assert S._lock_for("free-session").locked() is False
+
+
+# ------------------------------------------------------- token quota & wall clock
+class _SlowGraph(_FakeGraph):
+    """Graph that never produces a frame in time."""
+
+    async def astream(self, inputs, config, **kwargs):
+        await asyncio.sleep(5)
+        yield ((), "updates", {})  # pragma: no cover — cancelled by the timeout
+
+
+def test_enforce_token_quota_is_disabled_by_default(monkeypatch):
+    from server.deps import enforce_token_quota
+
+    monkeypatch.delenv("MAX_TOKENS_PER_USER_PER_DAY", raising=False)
+    asyncio.run(enforce_token_quota("u1"))  # must not raise
+
+
+def test_enforce_token_quota_allows_usage_under_the_limit(monkeypatch):
+    from server import deps
+    from server.deps import enforce_token_quota
+
+    async def fake_used(user_id: str) -> int:
+        return 10
+
+    monkeypatch.setattr(deps, "_tokens_used_today", fake_used)
+    monkeypatch.setenv("MAX_TOKENS_PER_USER_PER_DAY", "1000")
+    asyncio.run(enforce_token_quota("u1"))  # must not raise
+
+
+def test_enforce_token_quota_raises_429_over_the_limit(monkeypatch):
+    from server import deps
+    from server.deps import enforce_token_quota
+
+    async def fake_used(user_id: str) -> int:
+        return 10**9
+
+    monkeypatch.setattr(deps, "_tokens_used_today", fake_used)
+    monkeypatch.setenv("MAX_TOKENS_PER_USER_PER_DAY", "1000")
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(enforce_token_quota("u1"))
+
+    assert exc_info.value.status_code == 429
+
+
+def test_tokens_used_today_degrades_to_zero_without_a_database():
+    """No DATABASE_URL / unstarted engine must not raise — it means "no usage"."""
+    from server.deps import _tokens_used_today
+
+    assert asyncio.run(_tokens_used_today("u1")) == 0
+
+
+def test_run_timeout_seconds_parsing(monkeypatch):
+    from server.routers.sessions import _run_timeout_seconds
+
+    monkeypatch.delenv("RUN_TIMEOUT_SECONDS", raising=False)
+    assert _run_timeout_seconds() == 0
+
+    monkeypatch.setenv("RUN_TIMEOUT_SECONDS", "900")
+    assert _run_timeout_seconds() == 900
+
+    monkeypatch.setenv("RUN_TIMEOUT_SECONDS", "-5")
+    assert _run_timeout_seconds() == 0
+
+    monkeypatch.setenv("RUN_TIMEOUT_SECONDS", "abc")
+    assert _run_timeout_seconds() == 0
+
+
+def test_stream_frames_archives_failed_on_timeout(monkeypatch):
+    from server.routers import sessions as S
+
+    calls = _patch_settlement(monkeypatch)
+
+    frames = asyncio.run(
+        _collect(
+            S._stream_frames(
+                graph=_SlowGraph(),
+                inputs={},
+                config={},
+                session_id="s1",
+                user_id="u1",
+                run_timeout=0.05,
+                lock=None,
+            )
+        )
+    )
+
+    assert [_parse_frame(f)[0] for f in frames] == ["error"]
+    assert "timed out" in _parse_frame(frames[0])[1]["message"]
+    assert [c["status"] for c in calls] == ["failed"]
+    assert "timed out" in calls[0]["error_message"]
+
+
+def test_run_stream_rejects_a_user_over_quota(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from server import deps
+
+    app, calls = _sessions_app(monkeypatch)
+
+    async def fake_used(user_id: str) -> int:
+        return 10**9
+
+    monkeypatch.setattr(deps, "_tokens_used_today", fake_used)
+    monkeypatch.setenv("MAX_TOKENS_PER_USER_PER_DAY", "1000")
+
+    with TestClient(app) as client:
+        res = client.post("/api/sessions/quota-session/runs/stream", json={})
+
+    assert res.status_code == 429
+    # Nothing was archived or locked: the request never started a run.
+    assert calls == []
+
+
+def test_done_frame_carries_usage_totals(monkeypatch):
+    from server.routers import sessions as S
+
+    _patch_settlement(monkeypatch)
+
+    async def drive():
+        gen = S._stream_frames(
+            graph=_FakeGraph(
+                items=[((), "updates", {"final_report_generation": {"final_report": "R"}})]
+            ),
+            inputs={},
+            config={},
+            session_id="s1",
+            user_id="u1",
+            run_timeout=0,
+            lock=None,
+        )
+        return await _collect(gen)
+
+    frames = asyncio.run(drive())
+    done = _parse_frame(frames[-1])[1]
+
+    assert done["status"] == "completed"
+    assert done["usage"] == {}
