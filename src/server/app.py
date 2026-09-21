@@ -20,8 +20,20 @@ async def lifespan(app: FastAPI):
     """Initialize DB + graph on startup; record readiness flags for /api/health."""
     deps.ensure_env_loaded()
 
-    app.state.db_ready = await db.init_engine()
-    app.state.graph_ready = await graphs.manager.start()
+    # A missing database or graph must degrade, not crash: the API, /api/health
+    # and the served frontend stay available so the operator can diagnose.
+    try:
+        app.state.db_ready = await db.init_engine()
+    except Exception:
+        logger.exception("Database init failed; serving in degraded mode")
+        app.state.db_ready = False
+
+    try:
+        app.state.graph_ready = await graphs.manager.start()
+    except Exception:
+        logger.exception("Graph init failed; serving in degraded mode")
+        app.state.graph_ready = False
+
     logger.info(
         "Startup complete (db=%s, graph=%s, auth_mode=%s)",
         app.state.db_ready,
@@ -44,3 +56,8 @@ app.include_router(export.router, prefix="/api/sessions")
 _web_dist = os.environ.get("WEB_DIST", "web/dist")
 if os.path.isdir(_web_dist):
     app.mount("/", StaticFiles(directory=_web_dist, html=True), name="web")
+else:
+    logger.warning(
+        "Frontend dist not found at %s - serving API only. Build with: cd web && npm run build",
+        os.path.abspath(_web_dist),
+    )

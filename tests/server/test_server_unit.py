@@ -126,3 +126,89 @@ def test_ensure_env_loaded_does_not_override_existing_env(tmp_path, monkeypatch)
     deps.ensure_env_loaded()
 
     assert os.environ["ODR_SENTINEL_KEY"] == "from_shell"
+
+
+# ---------------------------------------------------------------- health
+def _health_app(db_ready: bool, graph_ready: bool):
+    """Minimal app with only the health router (no lifespan -> fully offline)."""
+    from fastapi import FastAPI
+
+    from server.routers.health import router
+
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    app.state.db_ready = db_ready
+    app.state.graph_ready = graph_ready
+    return app
+
+
+def test_health_returns_200_when_ready():
+    from fastapi.testclient import TestClient
+
+    with TestClient(_health_app(True, True)) as client:
+        res = client.get("/api/health")
+
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+    assert res.json()["db"] is True
+    assert res.json()["graph"] is True
+
+
+def test_health_returns_503_when_graph_not_ready():
+    from fastapi.testclient import TestClient
+
+    with TestClient(_health_app(True, False)) as client:
+        res = client.get("/api/health")
+
+    assert res.status_code == 503
+    assert res.json()["status"] == "degraded"
+    assert res.json()["graph"] is False
+
+
+def test_health_returns_503_when_db_not_ready():
+    from fastapi.testclient import TestClient
+
+    with TestClient(_health_app(False, True)) as client:
+        res = client.get("/api/health")
+
+    assert res.status_code == 503
+    assert res.json()["db"] is False
+
+
+# ---------------------------------------------------------------- checkpointer DSN
+def test_checkpointer_dsn_strips_asyncpg_and_adds_connect_timeout(monkeypatch):
+    from server import db
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://postgres:nodr@127.0.0.1:5433/nodr"
+    )
+    assert db.checkpointer_dsn() == (
+        "postgresql://postgres:nodr@127.0.0.1:5433/nodr?connect_timeout=10"
+    )
+
+
+def test_checkpointer_dsn_appends_to_existing_query_string(monkeypatch):
+    from server import db
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/d?sslmode=require"
+    )
+    assert db.checkpointer_dsn() == (
+        "postgresql://u:p@h:5432/d?sslmode=require&connect_timeout=10"
+    )
+
+
+def test_checkpointer_dsn_keeps_an_explicit_timeout(monkeypatch):
+    from server import db
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://u:p@h:5432/d?connect_timeout=30"
+    )
+    assert db.checkpointer_dsn() == "postgresql://u:p@h:5432/d?connect_timeout=30"
+
+
+def test_checkpointer_dsn_is_none_without_database_url(monkeypatch):
+    from server import db
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert db.checkpointer_dsn() is None
