@@ -96,6 +96,70 @@ def aggregate_usage(usage_acc: dict[tuple[str, str], dict[str, Any]]) -> dict[st
     return aggregated
 
 
+def _map_stream_item(
+    ns: tuple[str, ...] | list[str] | None,
+    mode: str,
+    payload: Any,
+    usage_acc: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[list[tuple[str, dict[str, Any]]], str | None]:
+    """Translate one ``astream(subgraphs=True)`` item into SSE frames.
+
+    Returns the frames to emit plus a final report when this item produced one.
+    Subgraph items (non-empty namespace) are tagged with ``subgraph: True`` and
+    their ``namespace`` so the client can tell ``researcher`` apart from a
+    same-named root node; before this, every subgraph event was dropped.
+
+    ``usage_acc`` is mutated in place and keyed by (node, message id): providers
+    stream either one final usage chunk or cumulative usage, so the last chunk
+    for an id wins (see ``aggregate_usage``).
+    """
+    frames: list[tuple[str, dict[str, Any]]] = []
+    final_report: str | None = None
+
+    namespace = tuple(ns or ())
+    subgraph = bool(namespace)
+    namespace_label = "/".join(namespace)
+
+    if mode == "updates":
+        for node, update in (payload or {}).items():
+            data: dict[str, Any] = {"node": node, "subgraph": subgraph}
+            if subgraph:
+                data["namespace"] = namespace_label
+            frames.append(("node", data))
+            if node == "final_report_generation":
+                final_report = (update or {}).get("final_report") or None
+        return frames, final_report
+
+    # mode == "messages": payload is (chunk, metadata)
+    chunk, metadata = payload
+    node = (metadata or {}).get("langgraph_node", "")
+    usage_metadata = getattr(chunk, "usage_metadata", None)
+    chunk_id = getattr(chunk, "id", None)
+    if usage_metadata and chunk_id:
+        input_tokens = usage_metadata.get("input_tokens") or 0
+        output_tokens = usage_metadata.get("output_tokens") or 0
+        if not output_tokens:
+            # Some providers report only input+total, and langchain normalises a
+            # missing output_tokens to 0 — derive it from the difference instead
+            # of silently recording zero output.
+            output_tokens = max((usage_metadata.get("total_tokens") or 0) - input_tokens, 0)
+        total_tokens = usage_metadata.get("total_tokens") or (input_tokens + output_tokens)
+        usage_acc[(node, chunk_id)] = {
+            "input": input_tokens,
+            "output": output_tokens,
+            "total": total_tokens,
+            "model": (getattr(chunk, "response_metadata", {}) or {}).get("model_name"),
+        }
+
+    content = _extract_text(getattr(chunk, "content", ""))
+    if content:
+        data = {"node": node, "content": content, "subgraph": subgraph}
+        if subgraph:
+            data["namespace"] = namespace_label
+        frames.append(("message", data))
+    return frames, None
+
+
 async def _record_usage(user_id: str, thread_id: str, aggregated: dict[str, dict[str, Any]]) -> None:
     """Persist one UsageEvent row per node; best-effort (never fail the run)."""
     if not aggregated:
@@ -290,38 +354,17 @@ async def stream_run(
         final_report: str | None = None
         usage_acc: dict[tuple[str, str], dict[str, Any]] = {}
         try:
-            async for mode, payload in graph.astream(
-                inputs, config, stream_mode=["updates", "messages"]
+            async for ns, mode, payload in graph.astream(
+                inputs,
+                config,
+                stream_mode=["updates", "messages"],
+                subgraphs=True,
             ):
-                if mode == "updates":
-                    for node in payload:
-                        update = payload[node] or {}
-                        if node == "final_report_generation":
-                            final_report = update.get("final_report") or final_report
-                        yield _sse("node", {"node": node})
-                else:  # ("messages", (chunk, metadata))
-                    chunk, metadata = payload
-                    node = (metadata or {}).get("langgraph_node", "")
-                    um = getattr(chunk, "usage_metadata", None)
-                    if um and getattr(chunk, "id", None):
-                        # Last chunk per (node, message id) wins — see aggregate_usage.
-                        usage_acc[(node, chunk.id)] = {
-                            "input": um.get("input_tokens", 0),
-                            "output": um.get("output_tokens", 0),
-                            "total": um.get("total_tokens", 0),
-                            "model": (getattr(chunk, "response_metadata", {}) or {}).get(
-                                "model_name"
-                            ),
-                        }
-                    content = _extract_text(getattr(chunk, "content", ""))
-                    if content:
-                        yield _sse(
-                            "message",
-                            {
-                                "node": node,
-                                "content": content,
-                            },
-                        )
+                frames, report = _map_stream_item(ns, mode, payload, usage_acc)
+                if report:
+                    final_report = report
+                for event, data in frames:
+                    yield _sse(event, data)
 
             # Classify the outcome from the persisted thread state.
             brief: str | None = None

@@ -212,3 +212,120 @@ def test_checkpointer_dsn_is_none_without_database_url(monkeypatch):
 
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert db.checkpointer_dsn() is None
+
+
+# ---------------------------------------------------------------- astream mapping
+def test_map_updates_root_report():
+    from server.routers.sessions import _map_stream_item
+
+    frames, report = _map_stream_item(
+        (), "updates", {"final_report_generation": {"final_report": "R"}}, {}
+    )
+    assert frames == [("node", {"node": "final_report_generation", "subgraph": False})]
+    assert report == "R"
+
+
+def test_map_updates_subgraph_node_emitted():
+    from server.routers.sessions import _map_stream_item
+
+    frames, report = _map_stream_item(
+        ("researcher:abc",), "updates", {"compress_research": {}}, {}
+    )
+    assert frames == [
+        (
+            "node",
+            {
+                "node": "compress_research",
+                "subgraph": True,
+                "namespace": "researcher:abc",
+            },
+        )
+    ]
+    assert report is None
+
+
+def test_map_messages_collects_usage_and_text():
+    from langchain_core.messages import AIMessage
+
+    from server.routers.sessions import _map_stream_item
+
+    usage: dict = {}
+    chunk = AIMessage(
+        content="hello",
+        id="m1",
+        usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    )
+    frames, report = _map_stream_item(
+        (), "messages", (chunk, {"langgraph_node": "supervisor"}), usage
+    )
+
+    assert frames == [
+        ("message", {"node": "supervisor", "content": "hello", "subgraph": False})
+    ]
+    assert usage[("supervisor", "m1")]["total"] == 15
+    assert report is None
+
+
+def test_map_messages_usage_keyed_per_message_not_overwritten():
+    from langchain_core.messages import AIMessage
+
+    from server.routers.sessions import _map_stream_item
+
+    def chunk(msg_id: str, total: int) -> AIMessage:
+        return AIMessage(
+            content="",
+            id=msg_id,
+            usage_metadata={"input_tokens": 1, "output_tokens": total - 1, "total_tokens": total},
+        )
+
+    usage: dict = {}
+    meta = {"langgraph_node": "researcher"}
+    for item in (chunk("m1", 10), chunk("m2", 20), chunk("m1", 30)):
+        _map_stream_item((), "messages", (item, meta), usage)
+
+    assert set(usage) == {("researcher", "m1"), ("researcher", "m2")}
+    assert usage[("researcher", "m1")]["total"] == 30  # last chunk for m1 wins
+    assert usage[("researcher", "m2")]["total"] == 20  # m2 untouched
+
+
+def test_map_messages_derives_output_tokens_from_total():
+    from langchain_core.messages import AIMessage
+
+    from server.routers.sessions import _map_stream_item
+
+    usage: dict = {}
+    # langchain requires all three usage keys, so the realistic "provider
+    # reported no output tokens" shape is output_tokens == 0 next to a larger
+    # total_tokens.
+    chunk = AIMessage(
+        content="x",
+        id="m1",
+        usage_metadata={"input_tokens": 10, "output_tokens": 0, "total_tokens": 25},
+    )
+    _map_stream_item((), "messages", (chunk, {"langgraph_node": "researcher"}), usage)
+
+    assert usage[("researcher", "m1")]["output"] == 15
+    assert usage[("researcher", "m1")]["total"] == 25
+
+
+def test_map_messages_in_subgraph_is_tagged():
+    from langchain_core.messages import AIMessage
+
+    from server.routers.sessions import _map_stream_item
+
+    chunk = AIMessage(content="from a subgraph", id="m1")
+    frames, _ = _map_stream_item(
+        ("researcher:abc",), "messages", (chunk, {"langgraph_node": "researcher"}), {}
+    )
+
+    assert frames == [
+        (
+            "message",
+            {
+                "node": "researcher",
+                "content": "from a subgraph",
+                "subgraph": True,
+                "namespace": "researcher:abc",
+            },
+        )
+    ]
