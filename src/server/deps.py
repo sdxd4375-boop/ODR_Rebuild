@@ -12,6 +12,7 @@ so a fresh clone can run without a Supabase project.
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from fastapi import Header, HTTPException
 
@@ -94,3 +95,36 @@ async def get_current_user_id(
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user_id
+
+_env_loaded = False
+
+
+def ensure_env_loaded() -> None:
+    """Load the repository .env into os.environ.
+
+    Idempotent, and never overrides variables already present in the real
+    environment (override=False), so shell exports and container env win.
+
+    Resolution order:
+      1. $ODR_ENV_FILE when set (explicit override for tests / deployments)
+      2. <repo root>/.env, located relative to THIS file — not the cwd, so the
+         server behaves the same however it is launched
+      3. python-dotenv's upward search as a fallback
+    """
+    global _env_loaded
+
+    if _env_loaded:
+        return
+
+    from dotenv import load_dotenv
+
+    repo_root = Path(__file__).resolve().parents[2]  # src/server/deps.py -> repo root
+    logger.debug("Resolving .env from repo root %s", repo_root)
+    explicit = os.environ.get("ODR_ENV_FILE")
+    if explicit:
+        load_dotenv(explicit, override=False)
+    elif (repo_root / ".env").exists():
+        load_dotenv(repo_root / ".env", override=False)
+    else:
+        load_dotenv(override=False)
+    _env_loaded = True

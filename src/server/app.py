@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from server import db, graphs
+from server import db, deps, graphs
 from server.deps import auth_mode
 from server.routers import documents, export, health, sessions
 
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize DB + graph on startup; record readiness flags for /api/health."""
+    deps.ensure_env_loaded()
+
     app.state.db_ready = await db.init_engine()
     app.state.graph_ready = await graphs.manager.start()
     logger.info(

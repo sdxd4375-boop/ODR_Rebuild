@@ -92,3 +92,37 @@ def test_sse_format_is_parseable():
 def test_sse_keeps_unicode():
     raw = _sse("message", {"content": "中文内容"})
     assert "中文内容" in raw
+
+
+# ---------------------------------------------------------------- .env loading
+def test_ensure_env_loaded_reads_env_file(tmp_path, monkeypatch):
+    import os
+
+    from server import deps
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("ODR_SENTINEL_KEY=loaded_ok\n", encoding="utf-8")
+    monkeypatch.setenv("ODR_ENV_FILE", str(env_file))
+    monkeypatch.delenv("ODR_SENTINEL_KEY", raising=False)
+    monkeypatch.setattr(deps, "_env_loaded", False)
+
+    deps.ensure_env_loaded()
+
+    assert os.environ["ODR_SENTINEL_KEY"] == "loaded_ok"
+    monkeypatch.delenv("ODR_SENTINEL_KEY", raising=False)
+
+
+def test_ensure_env_loaded_does_not_override_existing_env(tmp_path, monkeypatch):
+    import os
+
+    from server import deps
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("ODR_SENTINEL_KEY=from_file\n", encoding="utf-8")
+    monkeypatch.setenv("ODR_ENV_FILE", str(env_file))
+    monkeypatch.setenv("ODR_SENTINEL_KEY", "from_shell")
+    monkeypatch.setattr(deps, "_env_loaded", False)
+
+    deps.ensure_env_loaded()
+
+    assert os.environ["ODR_SENTINEL_KEY"] == "from_shell"

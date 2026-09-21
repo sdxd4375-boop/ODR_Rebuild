@@ -47,7 +47,7 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 async def init_engine() -> bool:
     """Create the engine and session factory. Returns True when a DB is reachable."""
     global _engine, _session_factory
-
+    
     url = database_url()
     if not url:
         logger.warning("DATABASE_URL is not set; persistence endpoints will be unavailable")
@@ -63,7 +63,9 @@ async def init_engine() -> bool:
 
         async with _engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("Business tables ensured via create_all (dev mode)")
+        logger.info("Business tables ensured via create_all (dev mode, no alembic_version "
+            "stamp). If you later adopt migrations on this database, run: "
+            "alembic stamp head  (then alembic upgrade head for new revisions)")
     return True
 
 
